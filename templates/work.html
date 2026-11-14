@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Work — {{ task.name }}{% endblock %}
+{% block topbar_right %}
+  <span>👤 {{ user_name }} <span style="color:var(--border)">|</span> {{ user_id }}</span>
+  <a href="/logout">Logout</a>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+    <div>
+      <h2 style="font-size:1.1rem;font-weight:700;">{{ task.name }}</h2>
+      <p style="color:var(--muted);font-size:0.85rem;">Entry #{{ entry.row_index + 1 }}</p>
+    </div>
+    <div id="entry-timer" style="font-size:1.5rem;font-weight:700;color:var(--primary);
+         background:#eff6ff;padding:8px 20px;border-radius:8px;">0:00</div>
+  </div>
+
+  <div class="card">
+    <form method="POST" action="/submit" id="entry-form">
+      <input type="hidden" name="entry_id" value="{{ entry.id }}">
+      <input type="hidden" name="time_spent" id="time_spent_field" value="0">
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;">
+        {% for col in columns_meta %}
+        <div class="form-group">
+          <label>
+            {{ col.name }}
+            {% if col.readonly %}
+              <span style="color:var(--muted);font-weight:400;text-transform:none;">(pre-filled)</span>
+            {% endif %}
+          </label>
+          {% if col.readonly %}
+            <input type="text" value="{{ prefill.get(col.name, '') }}" readonly>
+            <input type="hidden" name="field_{{ col.name }}" value="{{ prefill.get(col.name, '') }}">
+          {% else %}
+            <input type="text" name="field_{{ col.name }}"
+                   value="{{ prefill.get(col.name, '') }}"
+                   placeholder="Enter {{ col.name }}" autocomplete="off">
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+
+      <div style="margin-top:24px;display:flex;gap:12px;align-items:center;">
+        <button type="submit" class="btn btn-success" style="font-size:1rem;padding:12px 32px;">
+          ✓ Submit &amp; Next
+        </button>
+        <span style="font-size:0.85rem;color:var(--muted);">
+          Submitting will immediately load the next entry.
+        </span>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="timer-bar">
+  <span>⏱ Time on this entry: <strong id="bar-time">0:00</strong></span>
+  <span style="margin-left:auto;font-size:0.8rem;color:var(--muted)" id="idle-indicator"></span>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // ── Entry timer ──
+  let startTime = Date.now();
+  let idleTime = 0;
+  let lastActivity = Date.now();
+  const IDLE_THRESHOLD = 60; // seconds
+
+  function fmtTime(secs) {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  }
+
+  setInterval(() => {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    document.getElementById('entry-timer').textContent = fmtTime(elapsed);
+    document.getElementById('bar-time').textContent = fmtTime(elapsed);
+    document.getElementById('time_spent_field').value = elapsed;
+  }, 1000);
+
+  // ── Idle detection ──
+  ['mousemove','keydown','click','scroll','touchstart'].forEach(evt =>
+    document.addEventListener(evt, () => { lastActivity = Date.now(); })
+  );
+
+  let totalIdleThisPeriod = 0;
+  setInterval(() => {
+    const idleSecs = Math.floor((Date.now() - lastActivity) / 1000);
+    const indicator = document.getElementById('idle-indicator');
+    if (idleSecs > IDLE_THRESHOLD) {
+      indicator.textContent = `⚠ Idle for ${fmtTime(idleSecs)}`;
+      indicator.style.color = 'var(--warning)';
+      totalIdleThisPeriod = idleSecs;
+    } else {
+      indicator.textContent = '';
+      totalIdleThisPeriod = 0;
+    }
+  }, 5000);
+
+  // ── Heartbeat every 30s ──
+  setInterval(() => {
+    fetch('/heartbeat', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ idle_seconds: totalIdleThisPeriod })
+    });
+    totalIdleThisPeriod = 0;
+  }, 30000);
+
+  // ── Set time before submit ──
+  document.getElementById('entry-form').addEventListener('submit', () => {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    document.getElementById('time_spent_field').value = elapsed;
+  });
+</script>
+{% endblock %}

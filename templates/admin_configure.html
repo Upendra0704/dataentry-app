@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Configure Columns — {{ task.name }}{% endblock %}
+{% block topbar_right %}
+  <span style="font-weight:600;color:var(--primary);">⚙ Admin</span>
+  <a href="/admin">Dashboard</a>
+{% endblock %}
+
+{% block content %}
+<div class="container" style="max-width:600px;">
+  <h1 style="font-size:1.3rem;font-weight:700;margin-bottom:8px;">Configure Columns</h1>
+  <p style="color:var(--muted);margin-bottom:24px;font-size:0.9rem;">
+    Task: <strong>{{ task.name }}</strong> — Mark each column as pre-filled (read-only) or editable by users.
+  </p>
+
+  <div class="card">
+    <form method="POST">
+      {% for col in columns_meta %}
+      <div style="display:flex;align-items:center;justify-content:space-between;
+                  padding:12px 0;border-bottom:1px solid var(--border);">
+        <div>
+          <strong>{{ col.name }}</strong>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;text-transform:none;
+                      font-size:0.9rem;font-weight:400;color:var(--text);cursor:pointer;">
+          <input type="checkbox" name="readonly_{{ col.name }}"
+                 {% if col.readonly %}checked{% endif %}
+                 style="width:18px;height:18px;cursor:pointer;">
+          Pre-filled (read-only)
+        </label>
+      </div>
+      {% endfor %}
+
+      <div style="margin-top:20px;display:flex;gap:12px;">
+        <button type="submit" class="btn btn-primary">Save Configuration →</button>
+        <a href="/admin" class="btn btn-secondary">Skip (all editable)</a>
+      </div>
+    </form>
+  </div>
+
+  <div style="font-size:0.82rem;color:var(--muted);margin-top:8px;">
+    Pre-filled columns are shown to users but cannot be changed. Users fill in the editable columns.
+  </div>
+</div>
+{% endblock %}

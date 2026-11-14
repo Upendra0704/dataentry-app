@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}End Task — Confirm{% endblock %}
+{% block topbar_right %}
+  <a href="/admin">← Back</a>
+{% endblock %}
+
+{% block content %}
+<div class="container" style="max-width:520px;">
+  <div class="card" style="border-left:4px solid var(--danger);margin-top:32px;">
+    <div class="card-title" style="color:var(--danger);">🛑 End Task: {{ task.name }}?</div>
+
+    <p style="margin-bottom:16px;font-size:0.95rem;">
+      This will <strong>permanently end</strong> this task for all users.
+      Before ending, all data will be automatically exported to Excel.
+    </p>
+
+    {% if pending_count > 0 %}
+    <div class="flash flash-error" style="margin-bottom:16px;">
+      ⚠ Warning: <strong>{{ pending_count }}</strong> entries are still
+      Pending or In Progress and will be left incomplete.
+    </div>
+    {% else %}
+    <div class="flash flash-success" style="margin-bottom:16px;">
+      ✓ All entries have been completed.
+    </div>
+    {% endif %}
+
+    <p style="font-size:0.9rem;color:var(--muted);margin-bottom:20px;">
+      Do you confirm ending this task? This cannot be undone.
+      A new task can be started after this.
+    </p>
+
+    <div style="display:flex;gap:12px;">
+      <form method="POST" action="/admin/end_task">
+        <input type="hidden" name="task_id" value="{{ task.id }}">
+        <input type="hidden" name="confirmed" value="yes">
+        <button type="submit" class="btn btn-danger">
+          Yes, Export &amp; End Task
+        </button>
+      </form>
+      <a href="/admin" class="btn btn-secondary">Cancel</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

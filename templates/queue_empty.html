@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}All Done!{% endblock %}
+{% block topbar_right %}
+  <a href="/logout">Logout</a>
+{% endblock %}
+{% block content %}
+<div class="container" style="text-align:center;margin-top:80px;">
+  <div style="font-size:3rem;">🎉</div>
+  <h2 style="margin-top:16px;">Queue Complete!</h2>
+  <p style="color:var(--muted);margin-top:8px;">
+    All entries for <strong>{{ task.name }}</strong> have been completed or claimed.
+    Please wait for the admin to start a new task.
+  </p>
+  <a href="/work" class="btn btn-secondary" style="margin-top:20px;">Check Again</a>
+  <span style="margin:0 8px;color:var(--muted);">·</span>
+  <a href="/logout" class="btn btn-secondary" style="margin-top:20px;">Logout</a>
+</div>
+{% endblock %}

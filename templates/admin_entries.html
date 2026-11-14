@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Entries — {{ task.name }}{% endblock %}
+{% block topbar_right %}
+  <a href="/admin">← Dashboard</a>
+{% endblock %}
+{% block content %}
+<div class="container" style="max-width:1100px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+    <h2 style="font-size:1.2rem;">{{ task.name }} — Entries</h2>
+    <a href="/admin/export/{{ task.id }}" class="btn btn-secondary">⬇ Export Excel</a>
+  </div>
+  <div class="card" style="overflow-x:auto;padding:0;">
+    <table>
+      <tr>
+        <th>#</th>
+        <th>Status</th>
+        <th>Claimed By</th>
+        <th>Time (s)</th>
+        {% for col in columns_meta %}<th>{{ col.name }}</th>{% endfor %}
+      </tr>
+      {% for entry in entries %}
+      {% set prefill = entry.prefill_data | tojson | tojson %}
+      <tr>
+        <td>{{ entry.row_index + 1 }}</td>
+        <td>
+          <span class="badge badge-{{ 'done' if entry.status == 'done' else ('inprogress' if entry.status == 'in_progress' else 'pending') }}">
+            {{ entry.status }}
+          </span>
+        </td>
+        <td>{{ entry.claimed_by_name or '—' }}</td>
+        <td>{{ entry.time_spent_seconds or '—' }}</td>
+        {% set pf = entry.prefill_data %}
+        {% set ud = entry.user_data %}
+        {% for col in columns_meta %}
+        <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">—</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  <p style="font-size:0.8rem;color:var(--muted);margin-top:8px;">
+    Use Export Excel for full data with all field values.
+  </p>
+</div>
+{% endblock %}

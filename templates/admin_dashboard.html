@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Admin — DataEntry{% endblock %}
+{% block topbar_right %}
+  <span style="font-weight:600;color:var(--primary);">⚙ Admin</span>
+  <a href="/admin/logout">Logout</a>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+  <h1 style="font-size:1.4rem;font-weight:700;margin-bottom:24px;">Admin Dashboard</h1>
+
+  {% if active_task %}
+  <!-- Active task stats -->
+  <div class="card" style="border-left:4px solid var(--success);">
+    <div style="display:flex;justify-content:space-between;align-items:start;flex-wrap:wrap;gap:12px;">
+      <div>
+        <div class="card-title" style="margin-bottom:4px;">
+          🟢 Active Task: {{ active_task.name }}
+        </div>
+        <p style="font-size:0.85rem;color:var(--muted);">
+          Started: {{ active_task.created_at[:19].replace('T',' ') }} UTC
+        </p>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <a href="/admin/task_entries/{{ active_task.id }}" class="btn btn-secondary">View Entries</a>
+        <a href="/admin/export/{{ active_task.id }}" class="btn btn-secondary">⬇ Export Now</a>
+        <form method="POST" action="/admin/end_task" style="display:inline;">
+          <input type="hidden" name="task_id" value="{{ active_task.id }}">
+          <button type="submit" class="btn btn-danger">🛑 End Task</button>
+        </form>
+      </div>
+    </div>
+
+    {% if stats %}
+    <div class="stat-row" style="margin-top:20px;">
+      <div class="stat-box">
+        <div class="stat-num">{{ stats.total }}</div>
+        <div class="stat-label">Total Entries</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" style="color:var(--success);">{{ stats.done }}</div>
+        <div class="stat-label">Completed</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" style="color:var(--primary);">{{ stats.in_progress }}</div>
+        <div class="stat-label">In Progress</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" style="color:var(--warning);">{{ stats.pending }}</div>
+        <div class="stat-label">Pending</div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Active users -->
+  <div class="card">
+    <div class="card-title">👥 Active Users ({{ active_sessions|length }})</div>
+    {% if active_sessions %}
+    <table>
+      <tr><th>User ID</th><th>Name</th><th>Logged In</th><th>Idle (s)</th><th>Entries Done</th></tr>
+      {% for s in active_sessions %}
+      <tr>
+        <td><code>{{ s.user_id }}</code></td>
+        <td>{{ s.name }}</td>
+        <td>{{ s.login_at[:19].replace('T',' ') }}</td>
+        <td>{{ s.idle_seconds or 0 }}</td>
+        <td>{{ s.entries_completed or 0 }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+      <p style="color:var(--muted);font-size:0.9rem;">No users currently active.</p>
+    {% endif %}
+  </div>
+
+  {% else %}
+  <!-- No active task — start new one -->
+  <div class="card" style="border-left:4px solid var(--warning);">
+    <div class="card-title">⚠ No active task</div>
+    <p style="color:var(--muted);margin-bottom:20px;font-size:0.9rem;">
+      Upload an Excel file to create a new task. The app will auto-detect all columns.
+    </p>
+    <form method="POST" action="/admin/upload" enctype="multipart/form-data">
+      <div class="form-group">
+        <label>Task Name</label>
+        <input type="text" name="task_name" placeholder="e.g. Customer Verification – Nov 2026" required>
+      </div>
+      <div class="form-group">
+        <label>Excel File (.xlsx)</label>
+        <input type="file" name="excel_file" accept=".xlsx,.xls" required
+               style="padding:8px;background:#fff;cursor:pointer;">
+        <p style="font-size:0.78rem;color:var(--muted);margin-top:4px;">
+          First row must be column headers. After uploading you'll configure which columns are pre-filled vs editable.
+        </p>
+      </div>
+      <button type="submit" class="btn btn-primary">Upload &amp; Start Task →</button>
+    </form>
+  </div>
+  {% endif %}
+
+  <!-- Past tasks -->
+  {% if all_tasks %}
+  <div class="card">
+    <div class="card-title">📂 All Tasks</div>
+    <table>
+      <tr><th>ID</th><th>Name</th><th>Status</th><th>Created</th><th>Ended</th><th>Actions</th></tr>
+      {% for t in all_tasks %}
+      <tr>
+        <td>#{{ t.id }}</td>
+        <td>{{ t.name }}</td>
+        <td>
+          <span class="badge badge-{{ 'active' if t.status == 'active' else 'ended' }}">
+            {{ t.status }}
+          </span>
+        </td>
+        <td>{{ t.created_at[:10] }}</td>
+        <td>{{ t.ended_at[:10] if t.ended_at else '—' }}</td>
+        <td>
+          <a href="/admin/export/{{ t.id }}" style="color:var(--primary);font-size:0.85rem;">Export</a>
+          &nbsp;
+          <a href="/admin/task_entries/{{ t.id }}" style="color:var(--primary);font-size:0.85rem;">Entries</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

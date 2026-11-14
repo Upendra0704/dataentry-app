@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Login — DataEntry{% endblock %}
+{% block content %}
+<div class="container" style="max-width:420px;">
+  <div style="text-align:center;margin-bottom:32px;margin-top:32px;">
+    <div style="font-size:2.5rem;">📋</div>
+    <h1 style="font-size:1.5rem;margin-top:8px;">Data Entry Portal</h1>
+    {% if task %}
+      <p style="color:var(--muted);margin-top:6px;font-size:0.9rem;">
+        Active Task: <strong>{{ task.name }}</strong>
+      </p>
+    {% else %}
+      <p style="color:var(--warning);margin-top:6px;font-size:0.9rem;">
+        No active task at the moment. Check back later.
+      </p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-title">Sign In to Start Working</div>
+    <form method="POST">
+      <div class="form-group">
+        <label>Your Full Name</label>
+        <input type="text" name="name" placeholder="e.g. Rajesh Kumar" required autofocus>
+      </div>
+      <div class="form-group">
+        <label>User ID</label>
+        <input type="text" name="user_id" placeholder="e.g. EMP001" required
+               style="text-transform:uppercase;">
+        <p style="font-size:0.78rem;color:var(--muted);margin-top:4px;">
+          Your unique ID for audit tracking. Use the same ID every session.
+        </p>
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:8px;">
+        Start Working →
+      </button>
+    </form>
+  </div>
+
+  <p style="text-align:center;font-size:0.8rem;color:var(--muted);">
+    <a href="/admin/login" style="color:var(--muted);">Admin login</a>
+  </p>
+</div>
+{% endblock %}
