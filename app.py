@@ -29,7 +29,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-this-in-production-" + uui
 DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 EXPORT_FOLDER = os.path.join(os.path.dirname(__file__), "exports")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")  # Change in production
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(EXPORT_FOLDER, exist_ok=True)
@@ -159,7 +159,6 @@ def login():
                     "INSERT INTO users (user_id, name, created_at) VALUES (?,?,?)",
                     (user_id, name, now_iso())
                 )
-            # Create session
             conn.execute(
                 "INSERT INTO sessions (user_id, task_id, login_at, last_heartbeat) VALUES (?,?,?,?)",
                 (user_id, task["id"] if task else None, now_iso(), now_iso())
@@ -219,7 +218,6 @@ def work():
 
     with db_lock:
         with get_db() as conn:
-            # Try to find already claimed entry by this user
             entry = conn.execute(
                 """SELECT * FROM entries
                    WHERE task_id=? AND claimed_by=? AND status='in_progress'
@@ -228,7 +226,6 @@ def work():
             ).fetchone()
 
             if not entry:
-                # Claim next pending entry
                 entry = conn.execute(
                     """SELECT * FROM entries
                        WHERE task_id=? AND status='pending'
@@ -364,29 +361,22 @@ def admin_upload():
         flash("Task name and Excel file are required.", "error")
         return redirect(url_for("admin_dashboard"))
 
-    # Save file
     filename = f"{uuid.uuid4().hex}_{file.filename}"
     filepath = os.path.join(UPLOAD_FOLDER, filename)
     file.save(filepath)
 
     try:
-        wb = load_workbook(filepath, read_only=True, data_only=True)
-        ws = wb.active
-        headers = [str(cell.value).strip() for cell in next(ws.iter_rows(min_row=1, max_row=1)) if cell.value]
-
-        # Determine which columns are readonly (prefill) vs editable
-        # Convention: columns marked with * prefix in header = editable
-        # Otherwise default: ALL editable, admin can configure via form
-        readonly_cols = request.form.getlist("readonly_cols")
-        columns_meta = []
-        for h in headers:
-            columns_meta.append({
-                "name": h,
-                "readonly": h in readonly_cols
-            })
+        # Pass 1: read cell values
+        wb_data = load_workbook(filepath, read_only=True, data_only=True)
+        ws_data = wb_data.active
+        headers = [
+            str(cell.value).strip()
+            for cell in next(ws_data.iter_rows(min_row=1, max_row=1))
+            if cell.value
+        ]
 
         rows_data = []
-        for row in ws.iter_rows(min_row=2, values_only=True):
+        for row in ws_data.iter_rows(min_row=2, values_only=True):
             if all(v is None for v in row):
                 continue
             row_dict = {}
@@ -394,8 +384,63 @@ def admin_upload():
                 val = row[i] if i < len(row) else None
                 row_dict[h] = str(val) if val is not None else ""
             rows_data.append(row_dict)
+        wb_data.close()
 
-        wb.close()
+        # Pass 2: extract Data Validation dropdowns
+        wb_full = load_workbook(filepath, read_only=False, data_only=False)
+        ws_full = wb_full.active
+
+        from openpyxl.utils import get_column_letter, range_boundaries
+        col_letter_to_name = {}
+        for i, h in enumerate(headers):
+            col_letter_to_name[get_column_letter(i + 1)] = h
+
+        dropdown_options = {}
+        for dv in ws_full.data_validations.dataValidation:
+            if dv.type == "list" and dv.formula1:
+                raw = dv.formula1.strip('"')
+                if "," in raw and not raw.startswith("$") and "!" not in raw:
+                    options = [o.strip() for o in raw.split(",") if o.strip()]
+                elif "!" in raw or raw.startswith("$"):
+                    options = []
+                    try:
+                        ref_ws = ws_full
+                        ref_range = raw
+                        if "!" in raw:
+                            sheet_name, ref_range = raw.split("!", 1)
+                            sheet_name = sheet_name.strip("'")
+                            if sheet_name in wb_full.sheetnames:
+                                ref_ws = wb_full[sheet_name]
+                        for ref_row in ref_ws[ref_range]:
+                            for cell in (ref_row if hasattr(ref_row, '__iter__') else [ref_row]):
+                                if cell.value is not None:
+                                    options.append(str(cell.value).strip())
+                    except Exception:
+                        options = []
+                else:
+                    options = []
+
+                if options:
+                    for cell_range in str(dv.sqref).split():
+                        try:
+                            min_col, _, max_col, _ = range_boundaries(cell_range)
+                            for col_idx in range(min_col, max_col + 1):
+                                col_name = col_letter_to_name.get(get_column_letter(col_idx))
+                                if col_name:
+                                    dropdown_options[col_name] = options
+                        except Exception:
+                            pass
+
+        wb_full.close()
+
+        columns_meta = []
+        for h in headers:
+            columns_meta.append({
+                "name": h,
+                "readonly": False,
+                "dropdown": dropdown_options.get(h, [])
+            })
+
     except Exception as e:
         flash(f"Could not read Excel file: {e}", "error")
         return redirect(url_for("admin_dashboard"))
@@ -430,7 +475,11 @@ def admin_configure_columns(task_id):
         updated = []
         for col in columns_meta:
             is_readonly = request.form.get(f"readonly_{col['name']}") == "on"
-            updated.append({"name": col["name"], "readonly": is_readonly})
+            updated.append({
+                "name": col["name"],
+                "readonly": is_readonly,
+                "dropdown": col.get("dropdown", [])
+            })
         with get_db() as conn:
             conn.execute(
                 "UPDATE tasks SET columns_meta=? WHERE id=?",
@@ -465,14 +514,12 @@ def admin_end_task():
             pending_count=pending_count
         )
 
-    # Export first, then end
     export_path = _export_task(task_id)
     with get_db() as conn:
         conn.execute(
             "UPDATE tasks SET status='ended', ended_at=? WHERE id=?",
             (now_iso(), task_id)
         )
-        # Force-logout all active sessions for this task
         conn.execute(
             "UPDATE sessions SET logout_at=? WHERE task_id=? AND logout_at IS NULL",
             (now_iso(), task_id)
@@ -506,7 +553,6 @@ def _export_task(task_id):
 
     wb = openpyxl.Workbook()
 
-    # --- Sheet 1: Entries ---
     ws1 = wb.active
     ws1.title = "Entries"
     headers = col_names + ["Status", "Claimed By", "Claimed By Name",
@@ -527,7 +573,6 @@ def _export_task(task_id):
         ]
         ws1.append(row)
 
-    # --- Sheet 2: Time Tracking ---
     ws2 = wb.create_sheet("Time Tracking")
     ws2.append(["User ID", "Name", "Login", "Logout", "Idle (s)",
                 "Entries Completed", "Total Session Duration"])

@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Work — {{ task.name }}{% endblock %}
 {% block topbar_right %}
-  <span>👤 {{ user_name }} <span style="color:var(--border)">|</span> {{ user_id }}</span>
-  <a href="/logout">Logout</a>
+<span>👤 {{ user_name }} <span style="color:var(--border)">|</span> {{ user_id }}</span>
+<a href="/logout">Logout</a>
 {% endblock %}
 
 {% block content %}
@@ -27,16 +27,22 @@
           <label>
             {{ col.name }}
             {% if col.readonly %}
-              <span style="color:var(--muted);font-weight:400;text-transform:none;">(pre-filled)</span>
+            <span style="color:var(--muted);font-weight:400;text-transform:none;">(pre-filled)</span>
             {% endif %}
           </label>
-          {% if col.readonly %}
-            <input type="text" value="{{ prefill.get(col.name, '') }}" readonly>
-            <input type="hidden" name="field_{{ col.name }}" value="{{ prefill.get(col.name, '') }}">
+          {% elif col.dropdown %}
+          <select name="field_{{ col.name }}" style="width:100%;padding:10px 12px;border:1px solid var(--border);
+                           border-radius:6px;font-size:0.95rem;background:#fafcff;">
+            <option value="">— Select {{ col.name }} —</option>
+            {% for opt in col.dropdown %}
+            <option value="{{ opt }}" {% if prefill.get(col.name, '' )==opt %}selected{% endif %}>
+              {{ opt }}
+            </option>
+            {% endfor %}
+          </select>
           {% else %}
-            <input type="text" name="field_{{ col.name }}"
-                   value="{{ prefill.get(col.name, '') }}"
-                   placeholder="Enter {{ col.name }}" autocomplete="off">
+          <input type="text" name="field_{{ col.name }}" value="{{ prefill.get(col.name, '') }}"
+            placeholder="Enter {{ col.name }}" autocomplete="off">
           {% endif %}
         </div>
         {% endfor %}
@@ -82,7 +88,7 @@
   }, 1000);
 
   // ── Idle detection ──
-  ['mousemove','keydown','click','scroll','touchstart'].forEach(evt =>
+  ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'].forEach(evt =>
     document.addEventListener(evt, () => { lastActivity = Date.now(); })
   );
 
@@ -104,7 +110,7 @@
   setInterval(() => {
     fetch('/heartbeat', {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ idle_seconds: totalIdleThisPeriod })
     });
     totalIdleThisPeriod = 0;
