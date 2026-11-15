@@ -30,6 +30,11 @@
             <span style="color:var(--muted);font-weight:400;text-transform:none;">(pre-filled)</span>
             {% endif %}
           </label>
+
+          {% if col.readonly %}
+          <input type="text" value="{{ prefill.get(col.name, '') }}" readonly>
+          <input type="hidden" name="field_{{ col.name }}" value="{{ prefill.get(col.name, '') }}">
+
           {% elif col.dropdown %}
           <select name="field_{{ col.name }}" style="width:100%;padding:10px 12px;border:1px solid var(--border);
                            border-radius:6px;font-size:0.95rem;background:#fafcff;">
@@ -40,10 +45,12 @@
             </option>
             {% endfor %}
           </select>
+
           {% else %}
           <input type="text" name="field_{{ col.name }}" value="{{ prefill.get(col.name, '') }}"
             placeholder="Enter {{ col.name }}" autocomplete="off">
           {% endif %}
+
         </div>
         {% endfor %}
       </div>
@@ -68,11 +75,10 @@
 
 {% block scripts %}
 <script>
-  // ── Entry timer ──
   let startTime = Date.now();
-  let idleTime = 0;
   let lastActivity = Date.now();
-  const IDLE_THRESHOLD = 60; // seconds
+  let totalIdleThisPeriod = 0;
+  const IDLE_THRESHOLD = 60;
 
   function fmtTime(secs) {
     const m = Math.floor(secs / 60);
@@ -87,12 +93,10 @@
     document.getElementById('time_spent_field').value = elapsed;
   }, 1000);
 
-  // ── Idle detection ──
   ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'].forEach(evt =>
     document.addEventListener(evt, () => { lastActivity = Date.now(); })
   );
 
-  let totalIdleThisPeriod = 0;
   setInterval(() => {
     const idleSecs = Math.floor((Date.now() - lastActivity) / 1000);
     const indicator = document.getElementById('idle-indicator');
@@ -106,7 +110,6 @@
     }
   }, 5000);
 
-  // ── Heartbeat every 30s ──
   setInterval(() => {
     fetch('/heartbeat', {
       method: 'POST',
@@ -116,7 +119,6 @@
     totalIdleThisPeriod = 0;
   }, 30000);
 
-  // ── Set time before submit ──
   document.getElementById('entry-form').addEventListener('submit', () => {
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
     document.getElementById('time_spent_field').value = elapsed;
