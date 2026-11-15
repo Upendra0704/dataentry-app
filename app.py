@@ -29,7 +29,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-this-in-production-" + uui
 DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 EXPORT_FOLDER = os.path.join(os.path.dirname(__file__), "exports")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")  # Change in production
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(EXPORT_FOLDER, exist_ok=True)
@@ -159,6 +159,7 @@ def login():
                     "INSERT INTO users (user_id, name, created_at) VALUES (?,?,?)",
                     (user_id, name, now_iso())
                 )
+            # Create session
             conn.execute(
                 "INSERT INTO sessions (user_id, task_id, login_at, last_heartbeat) VALUES (?,?,?,?)",
                 (user_id, task["id"] if task else None, now_iso(), now_iso())
@@ -218,6 +219,7 @@ def work():
 
     with db_lock:
         with get_db() as conn:
+            # Try to find already claimed entry by this user
             entry = conn.execute(
                 """SELECT * FROM entries
                    WHERE task_id=? AND claimed_by=? AND status='in_progress'
@@ -226,6 +228,7 @@ def work():
             ).fetchone()
 
             if not entry:
+                # Claim next pending entry
                 entry = conn.execute(
                     """SELECT * FROM entries
                        WHERE task_id=? AND status='pending'
@@ -361,12 +364,13 @@ def admin_upload():
         flash("Task name and Excel file are required.", "error")
         return redirect(url_for("admin_dashboard"))
 
+    # Save file
     filename = f"{uuid.uuid4().hex}_{file.filename}"
     filepath = os.path.join(UPLOAD_FOLDER, filename)
     file.save(filepath)
 
     try:
-        # Pass 1: read cell values
+        # --- Pass 1: read data_only for cell values ---
         wb_data = load_workbook(filepath, read_only=True, data_only=True)
         ws_data = wb_data.active
         headers = [
@@ -386,43 +390,78 @@ def admin_upload():
             rows_data.append(row_dict)
         wb_data.close()
 
-        # Pass 2: extract Data Validation dropdowns
+        # --- Pass 2: read full workbook to extract Data Validation dropdowns ---
         wb_full = load_workbook(filepath, read_only=False, data_only=False)
         ws_full = wb_full.active
 
-        from openpyxl.utils import get_column_letter, range_boundaries
+        # Map column letter → header name
         col_letter_to_name = {}
         for i, h in enumerate(headers):
+            from openpyxl.utils import get_column_letter
             col_letter_to_name[get_column_letter(i + 1)] = h
 
-        dropdown_options = {}
+        # Extract dropdown options per column from Data Validation rules
+        dropdown_options = {}  # { header_name: [option1, option2, ...] }
+
+        def clean_range(r):
+            """Remove $ signs from a range like $A$1:$A$5 → A1:A5"""
+            return r.replace("$", "")
+
         for dv in ws_full.data_validations.dataValidation:
             if dv.type == "list" and dv.formula1:
                 raw = dv.formula1.strip('"')
-                if "," in raw and not raw.startswith("$") and "!" not in raw:
+
+                # Inline list e.g. "Yes,No,Maybe"
+                if "!" not in raw and not raw.startswith("$") and "," in raw:
                     options = [o.strip() for o in raw.split(",") if o.strip()]
-                elif "!" in raw or raw.startswith("$"):
+
+                # Sheet reference e.g. Sheet2!$A$1:$A$5 or 'Sheet 2'!$A$1:$A$5
+                elif "!" in raw:
                     options = []
                     try:
-                        ref_ws = ws_full
-                        ref_range = raw
-                        if "!" in raw:
-                            sheet_name, ref_range = raw.split("!", 1)
-                            sheet_name = sheet_name.strip("'")
-                            if sheet_name in wb_full.sheetnames:
-                                ref_ws = wb_full[sheet_name]
+                        # Split on last ! to handle sheet names with spaces
+                        idx = raw.rfind("!")
+                        sheet_name = raw[:idx].strip("'").strip('"')
+                        ref_range = clean_range(raw[idx+1:])
+
+                        # Find the sheet (case-insensitive match)
+                        ref_ws = None
+                        for sname in wb_full.sheetnames:
+                            if sname.lower() == sheet_name.lower():
+                                ref_ws = wb_full[sname]
+                                break
+                        if ref_ws is None:
+                            ref_ws = wb_full[wb_full.sheetnames[0]]  # fallback to first sheet
+
                         for ref_row in ref_ws[ref_range]:
-                            for cell in (ref_row if hasattr(ref_row, '__iter__') else [ref_row]):
-                                if cell.value is not None:
+                            cells = ref_row if hasattr(ref_row, '__iter__') else [ref_row]
+                            for cell in cells:
+                                if cell.value is not None and str(cell.value).strip():
                                     options.append(str(cell.value).strip())
                     except Exception:
                         options = []
+
+                # Single-column range on same sheet e.g. $A$1:$A$5
+                elif raw.startswith("$"):
+                    options = []
+                    try:
+                        ref_range = clean_range(raw)
+                        for ref_row in ws_full[ref_range]:
+                            cells = ref_row if hasattr(ref_row, '__iter__') else [ref_row]
+                            for cell in cells:
+                                if cell.value is not None and str(cell.value).strip():
+                                    options.append(str(cell.value).strip())
+                    except Exception:
+                        options = []
+
                 else:
                     options = []
 
                 if options:
+                    # Apply to all columns covered by this validation range
                     for cell_range in str(dv.sqref).split():
                         try:
+                            from openpyxl.utils import range_boundaries, get_column_letter
                             min_col, _, max_col, _ = range_boundaries(cell_range)
                             for col_idx in range(min_col, max_col + 1):
                                 col_name = col_letter_to_name.get(get_column_letter(col_idx))
@@ -475,11 +514,7 @@ def admin_configure_columns(task_id):
         updated = []
         for col in columns_meta:
             is_readonly = request.form.get(f"readonly_{col['name']}") == "on"
-            updated.append({
-                "name": col["name"],
-                "readonly": is_readonly,
-                "dropdown": col.get("dropdown", [])
-            })
+            updated.append({"name": col["name"], "readonly": is_readonly})
         with get_db() as conn:
             conn.execute(
                 "UPDATE tasks SET columns_meta=? WHERE id=?",
@@ -514,12 +549,14 @@ def admin_end_task():
             pending_count=pending_count
         )
 
+    # Export first, then end
     export_path = _export_task(task_id)
     with get_db() as conn:
         conn.execute(
             "UPDATE tasks SET status='ended', ended_at=? WHERE id=?",
             (now_iso(), task_id)
         )
+        # Force-logout all active sessions for this task
         conn.execute(
             "UPDATE sessions SET logout_at=? WHERE task_id=? AND logout_at IS NULL",
             (now_iso(), task_id)
@@ -553,6 +590,7 @@ def _export_task(task_id):
 
     wb = openpyxl.Workbook()
 
+    # --- Sheet 1: Entries ---
     ws1 = wb.active
     ws1.title = "Entries"
     headers = col_names + ["Status", "Claimed By", "Claimed By Name",
@@ -573,6 +611,7 @@ def _export_task(task_id):
         ]
         ws1.append(row)
 
+    # --- Sheet 2: Time Tracking ---
     ws2 = wb.create_sheet("Time Tracking")
     ws2.append(["User ID", "Name", "Login", "Logout", "Idle (s)",
                 "Entries Completed", "Total Session Duration"])
@@ -612,6 +651,24 @@ def admin_task_entries(task_id):
         entries=entries,
         columns_meta=columns_meta
     )
+
+@app.route("/admin/delete_task", methods=["POST"])
+@require_admin
+def admin_delete_task():
+    task_id = request.form.get("task_id", type=int)
+    with get_db() as conn:
+        task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not task:
+            flash("Task not found.", "error")
+            return redirect(url_for("admin_dashboard"))
+        if task["status"] == "active":
+            flash("Cannot delete an active task. End it first.", "error")
+            return redirect(url_for("admin_dashboard"))
+        conn.execute("DELETE FROM entries WHERE task_id=?", (task_id,))
+        conn.execute("DELETE FROM sessions WHERE task_id=?", (task_id,))
+        conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+    flash("Task deleted.", "success")
+    return redirect(url_for("admin_dashboard"))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
