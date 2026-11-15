@@ -1,7 +1,7 @@
 """
 Collaborative Data Entry Web App
 - Dynamic schema from uploaded Excel
-- SQLite runtime DB (not raw Excel for concurrent safety)
+- PostgreSQL database (persistent across deploys)
 - Admin controls: start task, end task, export
 - User auth: name + user ID, login/logout time tracking
 - Idle detection via heartbeat
@@ -21,15 +21,16 @@ from flask import (
 )
 import openpyxl
 from openpyxl import load_workbook
-import sqlite3
+import psycopg2
+import psycopg2.extras
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-this-in-production-" + uuid.uuid4().hex)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 EXPORT_FOLDER = os.path.join(os.path.dirname(__file__), "exports")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")  # Change in production
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(EXPORT_FOLDER, exist_ok=True)
@@ -41,58 +42,58 @@ db_lock = threading.Lock()
 # ─────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    # Render provides DATABASE_URL starting with postgres:// — psycopg2 needs postgresql://
+    url = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+    conn.autocommit = False
     return conn
 
 def init_db():
     with get_db() as conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            ended_at TEXT,
-            status TEXT NOT NULL DEFAULT 'active',
-            columns_meta TEXT NOT NULL,
-            created_by TEXT NOT NULL DEFAULT 'admin'
-        );
+        with conn.cursor() as cur:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                ended_at TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                columns_meta TEXT NOT NULL,
+                created_by TEXT NOT NULL DEFAULT 'admin'
+            );
 
-        CREATE TABLE IF NOT EXISTS entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id INTEGER NOT NULL,
-            row_index INTEGER NOT NULL,
-            prefill_data TEXT NOT NULL,
-            user_data TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            claimed_by TEXT,
-            claimed_by_name TEXT,
-            claimed_at TEXT,
-            submitted_at TEXT,
-            time_spent_seconds INTEGER,
-            FOREIGN KEY(task_id) REFERENCES tasks(id)
-        );
+            CREATE TABLE IF NOT EXISTS entries (
+                id SERIAL PRIMARY KEY,
+                task_id INTEGER NOT NULL REFERENCES tasks(id),
+                row_index INTEGER NOT NULL,
+                prefill_data TEXT NOT NULL,
+                user_data TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                claimed_by TEXT,
+                claimed_by_name TEXT,
+                claimed_at TEXT,
+                submitted_at TEXT,
+                time_spent_seconds INTEGER
+            );
 
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            task_id INTEGER,
-            login_at TEXT NOT NULL,
-            logout_at TEXT,
-            last_heartbeat TEXT,
-            idle_seconds INTEGER DEFAULT 0,
-            entries_completed INTEGER DEFAULT 0,
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
-        );
-        """)
+            CREATE TABLE IF NOT EXISTS sessions (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id),
+                task_id INTEGER,
+                login_at TEXT NOT NULL,
+                logout_at TEXT,
+                last_heartbeat TEXT,
+                idle_seconds INTEGER DEFAULT 0,
+                entries_completed INTEGER DEFAULT 0
+            );
+            """)
+        conn.commit()
 
 init_db()
 
@@ -105,9 +106,11 @@ def now_iso():
 
 def get_active_task():
     with get_db() as conn:
-        return conn.execute(
-            "SELECT * FROM tasks WHERE status='active' ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM tasks WHERE status='active' ORDER BY id DESC LIMIT 1"
+            )
+            return cur.fetchone()
 
 def require_user(f):
     @wraps(f)
@@ -148,23 +151,23 @@ def login():
             return render_template("login.html", task=task)
 
         with get_db() as conn:
-            existing = conn.execute(
-                "SELECT * FROM users WHERE user_id=?", (user_id,)
-            ).fetchone()
-            if existing and existing["name"].lower() != name.lower():
-                flash("User ID already registered to a different name.", "error")
-                return render_template("login.html", task=task)
-            if not existing:
-                conn.execute(
-                    "INSERT INTO users (user_id, name, created_at) VALUES (?,?,?)",
-                    (user_id, name, now_iso())
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
+                existing = cur.fetchone()
+                if existing and existing["name"].lower() != name.lower():
+                    flash("User ID already registered to a different name.", "error")
+                    return render_template("login.html", task=task)
+                if not existing:
+                    cur.execute(
+                        "INSERT INTO users (user_id, name, created_at) VALUES (%s,%s,%s)",
+                        (user_id, name, now_iso())
+                    )
+                cur.execute(
+                    "INSERT INTO sessions (user_id, task_id, login_at, last_heartbeat) VALUES (%s,%s,%s,%s) RETURNING id",
+                    (user_id, task["id"] if task else None, now_iso(), now_iso())
                 )
-            # Create session
-            conn.execute(
-                "INSERT INTO sessions (user_id, task_id, login_at, last_heartbeat) VALUES (?,?,?,?)",
-                (user_id, task["id"] if task else None, now_iso(), now_iso())
-            )
-            sess_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                sess_id = cur.fetchone()["id"]
+            conn.commit()
 
         session["user_id"] = user_id
         session["user_name"] = name
@@ -179,15 +182,17 @@ def logout():
     sess_id = session.get("session_db_id")
     if sess_id:
         with get_db() as conn:
-            conn.execute(
-                "UPDATE sessions SET logout_at=? WHERE id=?",
-                (now_iso(), sess_id)
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE sessions SET logout_at=%s WHERE id=%s",
+                    (now_iso(), sess_id)
+                )
+            conn.commit()
     session.clear()
     return redirect(url_for("login"))
 
 # ─────────────────────────────────────────────
-# Heartbeat (idle detection)
+# Heartbeat
 # ─────────────────────────────────────────────
 
 @app.route("/heartbeat", methods=["POST"])
@@ -197,10 +202,12 @@ def heartbeat():
     idle = request.json.get("idle_seconds", 0)
     if sess_id:
         with get_db() as conn:
-            conn.execute(
-                "UPDATE sessions SET last_heartbeat=?, idle_seconds=idle_seconds+? WHERE id=?",
-                (now_iso(), idle, sess_id)
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE sessions SET last_heartbeat=%s, idle_seconds=idle_seconds+%s WHERE id=%s",
+                    (now_iso(), idle, sess_id)
+                )
+            conn.commit()
     return jsonify({"ok": True})
 
 # ─────────────────────────────────────────────
@@ -219,28 +226,30 @@ def work():
 
     with db_lock:
         with get_db() as conn:
-            # Try to find already claimed entry by this user
-            entry = conn.execute(
-                """SELECT * FROM entries
-                   WHERE task_id=? AND claimed_by=? AND status='in_progress'
-                   LIMIT 1""",
-                (task["id"], user_id)
-            ).fetchone()
-
-            if not entry:
-                # Claim next pending entry
-                entry = conn.execute(
+            with conn.cursor() as cur:
+                cur.execute(
                     """SELECT * FROM entries
-                       WHERE task_id=? AND status='pending'
-                       ORDER BY row_index ASC LIMIT 1""",
-                    (task["id"],)
-                ).fetchone()
-                if entry:
-                    conn.execute(
-                        """UPDATE entries SET status='in_progress', claimed_by=?,
-                           claimed_by_name=?, claimed_at=? WHERE id=?""",
-                        (user_id, session["user_name"], now_iso(), entry["id"])
+                       WHERE task_id=%s AND claimed_by=%s AND status='in_progress'
+                       LIMIT 1""",
+                    (task["id"], user_id)
+                )
+                entry = cur.fetchone()
+
+                if not entry:
+                    cur.execute(
+                        """SELECT * FROM entries
+                           WHERE task_id=%s AND status='pending'
+                           ORDER BY row_index ASC LIMIT 1""",
+                        (task["id"],)
                     )
+                    entry = cur.fetchone()
+                    if entry:
+                        cur.execute(
+                            """UPDATE entries SET status='in_progress', claimed_by=%s,
+                               claimed_by_name=%s, claimed_at=%s WHERE id=%s""",
+                            (user_id, session["user_name"], now_iso(), entry["id"])
+                        )
+            conn.commit()
 
     if not entry:
         return render_template("queue_empty.html", task=task)
@@ -274,23 +283,26 @@ def submit():
             user_data[col["name"]] = val
 
     with get_db() as conn:
-        entry = conn.execute(
-            "SELECT * FROM entries WHERE id=? AND claimed_by=? AND status='in_progress'",
-            (entry_id, session["user_id"])
-        ).fetchone()
-        if not entry:
-            flash("Entry not found or already submitted.", "error")
-            return redirect(url_for("work"))
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM entries WHERE id=%s AND claimed_by=%s AND status='in_progress'",
+                (entry_id, session["user_id"])
+            )
+            entry = cur.fetchone()
+            if not entry:
+                flash("Entry not found or already submitted.", "error")
+                return redirect(url_for("work"))
 
-        conn.execute(
-            """UPDATE entries SET status='done', user_data=?,
-               submitted_at=?, time_spent_seconds=? WHERE id=?""",
-            (json.dumps(user_data), now_iso(), time_spent, entry_id)
-        )
-        conn.execute(
-            "UPDATE sessions SET entries_completed=entries_completed+1 WHERE id=?",
-            (session["session_db_id"],)
-        )
+            cur.execute(
+                """UPDATE entries SET status='done', user_data=%s,
+                   submitted_at=%s, time_spent_seconds=%s WHERE id=%s""",
+                (json.dumps(user_data), now_iso(), time_spent, entry_id)
+            )
+            cur.execute(
+                "UPDATE sessions SET entries_completed=entries_completed+1 WHERE id=%s",
+                (session["session_db_id"],)
+            )
+        conn.commit()
 
     return redirect(url_for("work"))
 
@@ -317,30 +329,31 @@ def admin_logout():
 @require_admin
 def admin_dashboard():
     with get_db() as conn:
-        active_task = get_active_task()
-        all_tasks = conn.execute(
-            "SELECT * FROM tasks ORDER BY id DESC"
-        ).fetchall()
-        active_sessions = []
-        if active_task:
-            active_sessions = conn.execute(
-                """SELECT s.*, u.name FROM sessions s
-                   JOIN users u ON s.user_id = u.user_id
-                   WHERE s.task_id=? AND s.logout_at IS NULL
-                   ORDER BY s.login_at DESC""",
-                (active_task["id"],)
-            ).fetchall()
-            stats = conn.execute(
-                """SELECT
-                    COUNT(*) as total,
-                    SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) as done,
-                    SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END) as in_progress,
-                    SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
-                   FROM entries WHERE task_id=?""",
-                (active_task["id"],)
-            ).fetchone()
-        else:
+        with conn.cursor() as cur:
+            active_task = get_active_task()
+            cur.execute("SELECT * FROM tasks ORDER BY id DESC")
+            all_tasks = cur.fetchall()
+            active_sessions = []
             stats = None
+            if active_task:
+                cur.execute(
+                    """SELECT s.*, u.name FROM sessions s
+                       JOIN users u ON s.user_id = u.user_id
+                       WHERE s.task_id=%s AND s.logout_at IS NULL
+                       ORDER BY s.login_at DESC""",
+                    (active_task["id"],)
+                )
+                active_sessions = cur.fetchall()
+                cur.execute(
+                    """SELECT
+                        COUNT(*) as total,
+                        SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) as done,
+                        SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END) as in_progress,
+                        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
+                       FROM entries WHERE task_id=%s""",
+                    (active_task["id"],)
+                )
+                stats = cur.fetchone()
 
     return render_template(
         "admin_dashboard.html",
@@ -364,13 +377,11 @@ def admin_upload():
         flash("Task name and Excel file are required.", "error")
         return redirect(url_for("admin_dashboard"))
 
-    # Save file
     filename = f"{uuid.uuid4().hex}_{file.filename}"
     filepath = os.path.join(UPLOAD_FOLDER, filename)
     file.save(filepath)
 
     try:
-        # --- Pass 1: read data_only for cell values ---
         wb_data = load_workbook(filepath, read_only=True, data_only=True)
         ws_data = wb_data.active
         headers = [
@@ -390,49 +401,38 @@ def admin_upload():
             rows_data.append(row_dict)
         wb_data.close()
 
-        # --- Pass 2: read full workbook to extract Data Validation dropdowns ---
         wb_full = load_workbook(filepath, read_only=False, data_only=False)
         ws_full = wb_full.active
 
-        # Map column letter → header name
         col_letter_to_name = {}
         for i, h in enumerate(headers):
             from openpyxl.utils import get_column_letter
             col_letter_to_name[get_column_letter(i + 1)] = h
 
-        # Extract dropdown options per column from Data Validation rules
-        dropdown_options = {}  # { header_name: [option1, option2, ...] }
+        dropdown_options = {}
 
         def clean_range(r):
-            """Remove $ signs from a range like $A$1:$A$5 → A1:A5"""
             return r.replace("$", "")
 
         for dv in ws_full.data_validations.dataValidation:
             if dv.type == "list" and dv.formula1:
                 raw = dv.formula1.strip('"')
 
-                # Inline list e.g. "Yes,No,Maybe"
                 if "!" not in raw and not raw.startswith("$") and "," in raw:
                     options = [o.strip() for o in raw.split(",") if o.strip()]
-
-                # Sheet reference e.g. Sheet2!$A$1:$A$5 or 'Sheet 2'!$A$1:$A$5
                 elif "!" in raw:
                     options = []
                     try:
-                        # Split on last ! to handle sheet names with spaces
                         idx = raw.rfind("!")
                         sheet_name = raw[:idx].strip("'").strip('"')
                         ref_range = clean_range(raw[idx+1:])
-
-                        # Find the sheet (case-insensitive match)
                         ref_ws = None
                         for sname in wb_full.sheetnames:
                             if sname.lower() == sheet_name.lower():
                                 ref_ws = wb_full[sname]
                                 break
                         if ref_ws is None:
-                            ref_ws = wb_full[wb_full.sheetnames[0]]  # fallback to first sheet
-
+                            ref_ws = wb_full[wb_full.sheetnames[0]]
                         for ref_row in ref_ws[ref_range]:
                             cells = ref_row if hasattr(ref_row, '__iter__') else [ref_row]
                             for cell in cells:
@@ -440,8 +440,6 @@ def admin_upload():
                                     options.append(str(cell.value).strip())
                     except Exception:
                         options = []
-
-                # Single-column range on same sheet e.g. $A$1:$A$5
                 elif raw.startswith("$"):
                     options = []
                     try:
@@ -453,12 +451,10 @@ def admin_upload():
                                     options.append(str(cell.value).strip())
                     except Exception:
                         options = []
-
                 else:
                     options = []
 
                 if options:
-                    # Apply to all columns covered by this validation range
                     for cell_range in str(dv.sqref).split():
                         try:
                             from openpyxl.utils import range_boundaries, get_column_letter
@@ -485,16 +481,18 @@ def admin_upload():
         return redirect(url_for("admin_dashboard"))
 
     with get_db() as conn:
-        conn.execute(
-            "INSERT INTO tasks (name, created_at, status, columns_meta, created_by) VALUES (?,?,?,?,?)",
-            (task_name, now_iso(), "active", json.dumps(columns_meta), "admin")
-        )
-        task_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        for i, row in enumerate(rows_data):
-            conn.execute(
-                "INSERT INTO entries (task_id, row_index, prefill_data, status) VALUES (?,?,?,?)",
-                (task_id, i, json.dumps(row), "pending")
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO tasks (name, created_at, status, columns_meta, created_by) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+                (task_name, now_iso(), "active", json.dumps(columns_meta), "admin")
             )
+            task_id = cur.fetchone()["id"]
+            for i, row in enumerate(rows_data):
+                cur.execute(
+                    "INSERT INTO entries (task_id, row_index, prefill_data, status) VALUES (%s,%s,%s,%s)",
+                    (task_id, i, json.dumps(row), "pending")
+                )
+        conn.commit()
 
     flash(f"Task '{task_name}' started with {len(rows_data)} entries.", "success")
     return redirect(url_for("admin_configure_columns", task_id=task_id))
@@ -503,7 +501,9 @@ def admin_upload():
 @require_admin
 def admin_configure_columns(task_id):
     with get_db() as conn:
-        task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
+            task = cur.fetchone()
     if not task:
         flash("Task not found.", "error")
         return redirect(url_for("admin_dashboard"))
@@ -514,12 +514,18 @@ def admin_configure_columns(task_id):
         updated = []
         for col in columns_meta:
             is_readonly = request.form.get(f"readonly_{col['name']}") == "on"
-            updated.append({"name": col["name"], "readonly": is_readonly})
+            updated.append({
+                "name": col["name"],
+                "readonly": is_readonly,
+                "dropdown": col.get("dropdown", [])
+            })
         with get_db() as conn:
-            conn.execute(
-                "UPDATE tasks SET columns_meta=? WHERE id=?",
-                (json.dumps(updated), task_id)
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tasks SET columns_meta=%s WHERE id=%s",
+                    (json.dumps(updated), task_id)
+                )
+            conn.commit()
         flash("Column configuration saved.", "success")
         return redirect(url_for("admin_dashboard"))
 
@@ -532,15 +538,17 @@ def admin_end_task():
     confirmed = request.form.get("confirmed") == "yes"
 
     with get_db() as conn:
-        task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if not task:
-            flash("Task not found.", "error")
-            return redirect(url_for("admin_dashboard"))
-
-        pending_count = conn.execute(
-            "SELECT COUNT(*) FROM entries WHERE task_id=? AND status IN ('pending','in_progress')",
-            (task_id,)
-        ).fetchone()[0]
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
+            task = cur.fetchone()
+            if not task:
+                flash("Task not found.", "error")
+                return redirect(url_for("admin_dashboard"))
+            cur.execute(
+                "SELECT COUNT(*) as cnt FROM entries WHERE task_id=%s AND status IN ('pending','in_progress')",
+                (task_id,)
+            )
+            pending_count = cur.fetchone()["cnt"]
 
     if not confirmed:
         return render_template(
@@ -549,18 +557,18 @@ def admin_end_task():
             pending_count=pending_count
         )
 
-    # Export first, then end
     export_path = _export_task(task_id)
     with get_db() as conn:
-        conn.execute(
-            "UPDATE tasks SET status='ended', ended_at=? WHERE id=?",
-            (now_iso(), task_id)
-        )
-        # Force-logout all active sessions for this task
-        conn.execute(
-            "UPDATE sessions SET logout_at=? WHERE task_id=? AND logout_at IS NULL",
-            (now_iso(), task_id)
-        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tasks SET status='ended', ended_at=%s WHERE id=%s",
+                (now_iso(), task_id)
+            )
+            cur.execute(
+                "UPDATE sessions SET logout_at=%s WHERE task_id=%s AND logout_at IS NULL",
+                (now_iso(), task_id)
+            )
+        conn.commit()
 
     flash(f"Task ended and data exported to {os.path.basename(export_path)}.", "success")
     return redirect(url_for("admin_dashboard"))
@@ -573,24 +581,26 @@ def admin_export(task_id):
 
 def _export_task(task_id):
     with get_db() as conn:
-        task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        entries = conn.execute(
-            "SELECT * FROM entries WHERE task_id=? ORDER BY row_index",
-            (task_id,)
-        ).fetchall()
-        sessions_data = conn.execute(
-            """SELECT s.*, u.name as user_name FROM sessions s
-               JOIN users u ON s.user_id = u.user_id
-               WHERE s.task_id=? ORDER BY s.login_at""",
-            (task_id,)
-        ).fetchall()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
+            task = cur.fetchone()
+            cur.execute(
+                "SELECT * FROM entries WHERE task_id=%s ORDER BY row_index",
+                (task_id,)
+            )
+            entries = cur.fetchall()
+            cur.execute(
+                """SELECT s.*, u.name as user_name FROM sessions s
+                   JOIN users u ON s.user_id = u.user_id
+                   WHERE s.task_id=%s ORDER BY s.login_at""",
+                (task_id,)
+            )
+            sessions_data = cur.fetchall()
 
     columns_meta = json.loads(task["columns_meta"])
     col_names = [c["name"] for c in columns_meta]
 
     wb = openpyxl.Workbook()
-
-    # --- Sheet 1: Entries ---
     ws1 = wb.active
     ws1.title = "Entries"
     headers = col_names + ["Status", "Claimed By", "Claimed By Name",
@@ -611,7 +621,6 @@ def _export_task(task_id):
         ]
         ws1.append(row)
 
-    # --- Sheet 2: Time Tracking ---
     ws2 = wb.create_sheet("Time Tracking")
     ws2.append(["User ID", "Name", "Login", "Logout", "Idle (s)",
                 "Entries Completed", "Total Session Duration"])
@@ -639,11 +648,14 @@ def _export_task(task_id):
 @require_admin
 def admin_task_entries(task_id):
     with get_db() as conn:
-        task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        entries = conn.execute(
-            "SELECT * FROM entries WHERE task_id=? ORDER BY row_index",
-            (task_id,)
-        ).fetchall()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
+            task = cur.fetchone()
+            cur.execute(
+                "SELECT * FROM entries WHERE task_id=%s ORDER BY row_index",
+                (task_id,)
+            )
+            entries = cur.fetchall()
     columns_meta = json.loads(task["columns_meta"])
     return render_template(
         "admin_entries.html",
@@ -657,16 +669,19 @@ def admin_task_entries(task_id):
 def admin_delete_task():
     task_id = request.form.get("task_id", type=int)
     with get_db() as conn:
-        task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if not task:
-            flash("Task not found.", "error")
-            return redirect(url_for("admin_dashboard"))
-        if task["status"] == "active":
-            flash("Cannot delete an active task. End it first.", "error")
-            return redirect(url_for("admin_dashboard"))
-        conn.execute("DELETE FROM entries WHERE task_id=?", (task_id,))
-        conn.execute("DELETE FROM sessions WHERE task_id=?", (task_id,))
-        conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
+            task = cur.fetchone()
+            if not task:
+                flash("Task not found.", "error")
+                return redirect(url_for("admin_dashboard"))
+            if task["status"] == "active":
+                flash("Cannot delete an active task. End it first.", "error")
+                return redirect(url_for("admin_dashboard"))
+            cur.execute("DELETE FROM entries WHERE task_id=%s", (task_id,))
+            cur.execute("DELETE FROM sessions WHERE task_id=%s", (task_id,))
+            cur.execute("DELETE FROM tasks WHERE id=%s", (task_id,))
+        conn.commit()
     flash("Task deleted.", "success")
     return redirect(url_for("admin_dashboard"))
 
