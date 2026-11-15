@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Admin — DataEntry{% endblock %}
 {% block topbar_right %}
-  <span style="font-weight:600;color:var(--primary);">⚙ Admin</span>
-  <a href="/admin/logout">Logout</a>
+<span style="font-weight:600;color:var(--primary);">⚙ Admin</span>
+<a href="/admin/logout">Logout</a>
 {% endblock %}
 
 {% block content %}
@@ -58,7 +58,13 @@
     <div class="card-title">👥 Active Users ({{ active_sessions|length }})</div>
     {% if active_sessions %}
     <table>
-      <tr><th>User ID</th><th>Name</th><th>Logged In</th><th>Idle (s)</th><th>Entries Done</th></tr>
+      <tr>
+        <th>User ID</th>
+        <th>Name</th>
+        <th>Logged In</th>
+        <th>Idle (s)</th>
+        <th>Entries Done</th>
+      </tr>
       {% for s in active_sessions %}
       <tr>
         <td><code>{{ s.user_id }}</code></td>
@@ -70,7 +76,7 @@
       {% endfor %}
     </table>
     {% else %}
-      <p style="color:var(--muted);font-size:0.9rem;">No users currently active.</p>
+    <p style="color:var(--muted);font-size:0.9rem;">No users currently active.</p>
     {% endif %}
   </div>
 
@@ -89,7 +95,7 @@
       <div class="form-group">
         <label>Excel File (.xlsx)</label>
         <input type="file" name="excel_file" accept=".xlsx,.xls" required
-               style="padding:8px;background:#fff;cursor:pointer;">
+          style="padding:8px;background:#fff;cursor:pointer;">
         <p style="font-size:0.78rem;color:var(--muted);margin-top:4px;">
           First row must be column headers. After uploading you'll configure which columns are pre-filled vs editable.
         </p>
@@ -99,32 +105,69 @@
   </div>
   {% endif %}
 
-  <!-- Past tasks -->
-  {% if all_tasks %}
-  <div class="card">
-    <div class="card-title">📂 All Tasks</div>
-    <table>
-      <tr><th>ID</th><th>Name</th><th>Status</th><th>Created</th><th>Ended</th><th>Actions</th></tr>
-      {% for t in all_tasks %}
-      <tr>
-        <td>#{{ t.id }}</td>
-        <td>{{ t.name }}</td>
-        <td>
-          <span class="badge badge-{{ 'active' if t.status == 'active' else 'ended' }}">
-            {{ t.status }}
-          </span>
-        </td>
-        <td>{{ t.created_at[:10] }}</td>
-        <td>{{ t.ended_at[:10] if t.ended_at else '—' }}</td>
-        <td>
-          <a href="/admin/export/{{ t.id }}" style="color:var(--primary);font-size:0.85rem;">Export</a>
-          &nbsp;
-          <a href="/admin/task_entries/{{ t.id }}" style="color:var(--primary);font-size:0.85rem;">Entries</a>
-        </td>
-      </tr>
-      {% endfor %}
-    </table>
+  <!-- Past tasks — hidden by default, shown on click -->
+  {% set ended_tasks = all_tasks | selectattr("status", "equalto", "ended") | list %}
+  {% if ended_tasks %}
+  <div style="margin-top:8px;">
+    <button onclick="toggleHistory()" id="history-btn" style="background:none;border:none;color:var(--muted);font-size:0.85rem;
+                   cursor:pointer;padding:8px 0;display:flex;align-items:center;gap:6px;">
+      <span id="history-arrow">▶</span>
+      Show past tasks ({{ ended_tasks|length }})
+    </button>
+
+    <div id="history-panel" style="display:none;margin-top:8px;">
+      <div class="card" style="padding:0;">
+        <table>
+          <tr>
+            <th>#</th>
+            <th>Name</th>
+            <th>Created</th>
+            <th>Ended</th>
+            <th>Actions</th>
+          </tr>
+          {% for t in ended_tasks %}
+          <tr>
+            <td style="color:var(--muted);">#{{ t.id }}</td>
+            <td>{{ t.name }}</td>
+            <td>{{ t.created_at[:10] }}</td>
+            <td>{{ t.ended_at[:10] if t.ended_at else '—' }}</td>
+            <td style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+              <a href="/admin/export/{{ t.id }}" style="color:var(--primary);font-size:0.85rem;">⬇ Export</a>
+              <a href="/admin/task_entries/{{ t.id }}" style="color:var(--primary);font-size:0.85rem;">Entries</a>
+              <form method="POST" action="/admin/delete_task"
+                onsubmit="return confirm('Permanently delete task \'{{ t.name }}\'?\nThis cannot be undone.');"
+                style="display:inline;">
+                <input type="hidden" name="task_id" value="{{ t.id }}">
+                <button type="submit" style="background:none;border:none;color:var(--danger);
+                               font-size:0.85rem;cursor:pointer;padding:0;">
+                  🗑 Delete
+                </button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </table>
+      </div>
+    </div>
   </div>
   {% endif %}
+
 </div>
+
+<script>
+  function toggleHistory() {
+    const panel = document.getElementById('history-panel');
+    const arrow = document.getElementById('history-arrow');
+    const btn = document.getElementById('history-btn');
+    if (panel.style.display === 'none') {
+      panel.style.display = 'block';
+      arrow.textContent = '▼';
+      btn.innerHTML = btn.innerHTML.replace('Show past', 'Hide past');
+    } else {
+      panel.style.display = 'none';
+      arrow.textContent = '▶';
+      btn.innerHTML = btn.innerHTML.replace('Hide past', 'Show past');
+    }
+  }
+</script>
 {% endblock %}
